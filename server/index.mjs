@@ -11,7 +11,8 @@ const port = Number(process.env.PORT || process.env.LEARNLY_API_PORT || 8787)
 const sessionDays = 7
 const passwordResetMinutes = 30
 const passwordMinimumLength = 10
-const demoMode = process.env.npm_lifecycle_event === 'server' || process.env.NODE_ENV === 'development' || process.env.LEARNLY_ENABLE_DEMO === 'true'
+// Demo data is never enabled by the npm command name. Production must opt in explicitly.
+const demoMode = process.env.NODE_ENV === 'development' || process.env.LEARNLY_ENABLE_DEMO === 'true'
 const resetRateLimits = new Map()
 const distDirectory = resolve('dist')
 const uploadDirectory = resolve(process.env.LEARNLY_UPLOAD_DIR || 'data/uploads')
@@ -69,6 +70,18 @@ async function seedDemoAccounts() {
     const timestamp = now(); const courseId = id(); const chapterId = id(); const lessonId = id()
     transaction(() => { run('INSERT INTO courses VALUES (?,?,?,?,?,?,?,?)', courseId, 'Demo Mathematics · Class 8', 'mathematics', 8, teacher.id, 'A development-only sample course.', 1, timestamp); run('INSERT INTO chapters VALUES (?,?,?,?,?)', chapterId, courseId, 'Demo chapter', 'A sample chapter for local testing.', 1); run('INSERT INTO lessons (id,chapter_id,title,description,video_label,notes_label,material_label,content,status,position,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)', lessonId, chapterId, 'Demo published lesson', 'A sample lesson visible to the Demo Student.', 'Demo video placeholder', 'Demo notes', 'Demo worksheet', 'This development-only lesson confirms the student access flow.', 'published', 1, timestamp) })
   }
+}
+async function bootstrapConfiguredAdmin() {
+  const email = normalizeEmail(process.env.ADMIN_EMAIL)
+  const password = String(process.env.ADMIN_PASSWORD || '')
+  const name = String(process.env.ADMIN_NAME || 'Platform Administrator').trim()
+  if (one("SELECT id FROM users WHERE role='admin'")) return
+  if (!email && !password) return
+  if (!email.includes('@') || password.length < 12) throw new Error('ADMIN_EMAIL and ADMIN_PASSWORD must be set together; ADMIN_PASSWORD must be at least 12 characters.')
+  if (one('SELECT id FROM users WHERE email=?', email)) throw new Error('ADMIN_EMAIL is already assigned to a non-admin account.')
+  const timestamp = now(); const userId = id(); const passwordHash = await hashPassword(password)
+  transaction(() => { run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)', userId, 'admin', email, name || 'Platform Administrator', null, 'active', timestamp, timestamp); run('INSERT INTO credentials VALUES (?,?,?)', userId, passwordHash, timestamp) })
+  console.log('Configured first admin created.')
 }
 function publicUser(user) { return { id: user.id, role: user.role, email: user.email, displayName: user.display_name, classLevel: user.class_level, accessState: user.access_state } }
 function event(userId, type, request, detail, sessionId) { run('INSERT INTO security_events (id,user_id,type,occurred_at,session_id,device_label,detail) VALUES (?,?,?,?,?,?,?)', id(), userId || null, type, now(), sessionId || null, deviceLabel(request), detail || null) }
@@ -183,7 +196,7 @@ async function route(request, response) {
     if (request.method === 'PATCH' && /^\/api\/teacher\/lessons\/[^/]+$/.test(path)) { const auth = requireRole(request, response, ['teacher']); if (!auth) return; const lessonId = path.split('/')[4]; const lesson = one(`SELECT l.id,c.id AS course_id,c.teacher_id FROM lessons l JOIN chapters ch ON ch.id=l.chapter_id JOIN courses c ON c.id=ch.course_id WHERE l.id=?`, lessonId); if (!lesson || lesson.teacher_id !== auth.user.id) return json(response, 404, { error: 'Lesson not found.' }); const body = await readJson(request); const classLevel = Number(body.classLevel); const assignedStudentIds = Array.isArray(body.assignedStudentIds) ? body.assignedStudentIds : []; const status = body.status === 'published' ? 'published' : 'draft'; if (!['mathematics','science','english','sst'].includes(body.subject) || ![8,9,10].includes(classLevel) || !String(body.title || '').trim()) return json(response, 400, { error: 'Choose a subject, class, and lesson title.' }); const validAssignments = all(`SELECT id FROM users WHERE role='student' AND access_state='active' AND class_level=? AND id IN (${assignedStudentIds.map(() => '?').join(',') || "''"})`, classLevel, ...assignedStudentIds).map((student) => student.id); if (validAssignments.length !== assignedStudentIds.length) return json(response, 400, { error: 'Assigned students must be active students in the selected class.' }); transaction(() => { run('UPDATE lessons SET title=?,description=?,content=?,video_label=?,notes_label=?,material_label=?,status=? WHERE id=?', String(body.title).trim(), String(body.description || ''), String(body.content || ''), String(body.videoLabel || ''), String(body.notesLabel || ''), String(body.materialLabel || ''), status, lessonId); run('UPDATE courses SET subject=?,class_level=?,description=? WHERE id=?', body.subject, classLevel, String(body.courseDescription || 'Teacher-created course'), lesson.course_id); run('DELETE FROM lesson_assignments WHERE lesson_id=?', lessonId); validAssignments.forEach((studentId) => run('INSERT INTO lesson_assignments VALUES (?,?)', lessonId, studentId)); }); return json(response, 200, { ok: true }) }
     if (request.method === 'DELETE' && /^\/api\/teacher\/lessons\/[^/]+$/.test(path)) { const auth = requireRole(request, response, ['teacher']); if (!auth) return; const lessonId = path.split('/')[4]; const lesson = one(`SELECT l.id,c.id AS course_id,c.teacher_id FROM lessons l JOIN chapters ch ON ch.id=l.chapter_id JOIN courses c ON c.id=ch.course_id WHERE l.id=?`, lessonId); if (!lesson || lesson.teacher_id !== auth.user.id) return json(response, 404, { error: 'Lesson not found.' }); const assets = all('SELECT stored_filename FROM lesson_assets WHERE lesson_id=?', lessonId); const result = run('DELETE FROM lessons WHERE id=?', lessonId); if (!result.changes) return json(response, 404, { error: 'Lesson not found.' }); await Promise.all(assets.map((asset) => unlink(resolve(uploadDirectory, asset.stored_filename)).catch(() => undefined))); return json(response, 200, { ok: true }) }
     return json(response, 404, { error: 'Route not found.' })
-  } catch (error) { console.error(error); return json(response, 500, { error: 'The local server could not complete this request.' }) }
+  } catch (error) { if (process.env.NODE_ENV !== 'production') console.error(error); return json(response, 500, { error: 'The server could not complete this request.' }) }
 }
 
 async function serveFrontend(request, response) {
@@ -205,5 +218,6 @@ async function application(request, response) {
   return serveFrontend(request, response)
 }
 
+await bootstrapConfiguredAdmin()
 await seedDemoAccounts()
 createServer(application).listen(port, '0.0.0.0', () => console.log(`Tutorial Online Class listening on http://0.0.0.0:${port} using ${databasePath}${demoMode ? ' (demo accounts enabled)' : ''}`))
