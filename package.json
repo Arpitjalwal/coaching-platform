@@ -14,15 +14,18 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
+    "@vitejs/plugin-react": "^4.3.4",
     "better-sqlite3": "^13.0.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.10"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "typescript": "^5.6.3"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
   }
 }
